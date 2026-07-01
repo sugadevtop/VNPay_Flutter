@@ -94,10 +94,11 @@ class VNPAYFlutter {
       hashDataBuffer.write('&');
     });
     String hashData = hashDataBuffer.toString().substring(0, hashDataBuffer.length - 1);
-    // Encode value khi build query gui di de cac ky tu dac biet (vd returnUrl
-    // co san query nhu ?type=vnpay, dau cach trong orderInfo...) khong lam hong
-    // payment URL. hashData o tren van giu raw theo dung chuan VNPay (VNPay
-    // decode lai truoc khi validate hash) nen secure hash khong doi.
+
+    // URL-encode query parameter values to ensure special characters
+    // (e.g. spaces, '&', '?', '=') produce a valid payment URL.
+    // The hash is still calculated from the original values, matching
+    // VNPay's signature validation rules.
     String query = sortedParam.entries.map((e) => '${e.key}=${Uri.encodeComponent(e.value)}').join('&');
     String vnpSecureHash = "";
 
@@ -112,14 +113,11 @@ class VNPAYFlutter {
     return paymentUrl;
   }
 
-  /// Mo app ngoai cho cac URL khong phai http/https (deeplink app ngan hang,
-  /// VNPay, hoac Android `intent://`). Goi launchUrl truc tiep, KHONG dung
-  /// canLaunchUrl, de tranh bi package visibility cua Android 11+ (<queries>)
-  /// chan - giong cach startActivity cua SDK native VNPay. Tra ve true neu mo
-  /// duoc.
+  /// Opens an external application for non-HTTP(S) URLs such as
+  /// banking app deep links, VNPay links, or Android intent URLs.
+  /// Returns true if an external application is launched successfully.
   Future<bool> _launchExternalApp(String url) async {
-    // Android intent URL:
-    // intent://HOST/PATH#Intent;scheme=SCHEME;package=PKG;S.browser_fallback_url=URL;end
+    // Android intent URL: intent://HOST/PATH#Intent;scheme=SCHEME;package=PKG;S.browser_fallback_url=URL;end
     if (url.startsWith('intent://')) {
       final fragmentIndex = url.indexOf('#Intent;');
       final base = fragmentIndex >= 0 ? url.substring('intent://'.length, fragmentIndex) : url.substring('intent://'.length);
@@ -135,7 +133,7 @@ class VNPAYFlutter {
         }
       }
 
-      // Thu mo app dich bang scheme that (vd: vnpayapp://...).
+      // Launch the target application if available.
       if (scheme != null && scheme.isNotEmpty) {
         try {
           final appUri = Uri.parse('$scheme://$base');
@@ -143,10 +141,11 @@ class VNPAYFlutter {
             return true;
           }
         } catch (_) {
-          // Khong co app cai dat -> roi xuong link du phong ben duoi.
+          // Failed to launch the target app. Try the fallback URL instead.
         }
       }
-      // Khong mo duoc app -> mo link du phong (thuong la trang tai app / web).
+
+      // Open the fallback URL if the target application cannot be launched.
       if (fallbackUrl != null && fallbackUrl.isNotEmpty) {
         try {
           return await launchUrl(Uri.parse(fallbackUrl), mode: LaunchMode.externalApplication);
@@ -157,7 +156,7 @@ class VNPAYFlutter {
       return false;
     }
 
-    // Cac custom scheme khac (deeplink truc tiep cua app ngan hang/VNPay).
+    // Launch other custom URL schemes directly.
     try {
       return await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
     } catch (_) {
@@ -165,9 +164,8 @@ class VNPAYFlutter {
     }
   }
 
-  // Inject AT_DOCUMENT_START via initialUserScripts, dam bao window.open da
-  // bi override truoc khi bat ky script nao cua trang VNPay chay. Day la diem
-  // khac biet chinh so voi webview_flutter (chi co the inject sau onPageStarted).
+  // Force links and window.open() to stay in the current WebView.
+  // This keeps the payment flow in a single WebView whenever possible.
   static const String _forceSameWindowJs = '''
 (function() {
   try {
@@ -187,8 +185,7 @@ class VNPAYFlutter {
 })();
 ''';
 
-  /// Map URL sentinel cua VNPay SDK (success/fail/cancel.sdk.merchantbackapp)
-  /// sang trang thai thanh toan, dung cho cau hinh returnUrl kieu VNPay SDK.
+  /// Returns the payment status from a VNPay SDK callback host.
   VNPayPaymentStatus _statusFromSentinel(String host) {
     if (host.startsWith('success')) return VNPayPaymentStatus.success;
     if (host.startsWith('cancel')) return VNPayPaymentStatus.cancelled;
@@ -196,6 +193,7 @@ class VNPAYFlutter {
     return VNPayPaymentStatus.unknown;
   }
 
+  /// Handles payment callback URLs and determines whether the navigation should continue or be intercepted.
   NavigationActionPolicy _handleUrl({
     required String url,
     required Uri returnUri,
@@ -256,34 +254,36 @@ class VNPAYFlutter {
             body: InAppWebView(
               initialUrlRequest: URLRequest(url: WebUri(paymentUrl)),
               initialSettings: InAppWebViewSettings(
+                // Allow pages to request opening a new window.
+                // Used as a fallback when a page cannot stay in the current WebView.
                 javaScriptEnabled: true,
-                // Cho phep window.open fire onCreateWindow de bat lam backup.
                 javaScriptCanOpenWindowsAutomatically: true,
                 supportMultipleWindows: true,
               ),
-              // AT_DOCUMENT_START: inject truoc khi bat ky script nao cua trang chay.
-              // Day la diem manh chinh cua InAppWebView so voi webview_flutter —
-              // dam bao window.open bi override san truoc moi cuoc goi tu VNPay page.
+
+              // Inject helper scripts before the page starts loading.
+              // Used to keep navigation in the current WebView whenever possible.
               initialUserScripts: UnmodifiableListView([
                 UserScript(
                   source: _forceSameWindowJs,
                   injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
                 ),
               ]),
-              // Primary handler: bat moi navigation request (bao gom window.open
-              // da bi override thanh window.location.href boi initialUserScripts).
+
+              // Main navigation handler.
+              // Detects payment callbacks, launches external banking apps,
+              // and decides whether to allow or block navigation.
               shouldOverrideUrlLoading: (controller, navigationAction) async {
                 print("============ VNPAY==============");
                 print("URL: ${navigationAction.request.url}");
                 print("Method: ${navigationAction.request.method}");
-
 
                 final url = navigationAction.request.url?.toString() ?? '';
                 if (url.isEmpty) return NavigationActionPolicy.ALLOW;
 
                 final currentUri = Uri.parse(url);
 
-                // Kiem tra callback/sentinel truoc.
+                // Check callback/sentinel before proceeding.
                 final policy = _handleUrl(
                   url: url,
                   returnUri: returnUri,
@@ -292,7 +292,7 @@ class VNPAYFlutter {
                 );
                 if (policy == NavigationActionPolicy.CANCEL) return policy;
 
-                // Non-http/https: mo app ngan hang / VNPay app ben ngoai.
+                // Non-http/https: external banking app / VNPay app.
                 if (currentUri.scheme != 'http' && currentUri.scheme != 'https') {
                   final opened = await _launchExternalApp(url);
                   if (opened) onResponse(VNPayPaymentStatus.openBankingApp);
@@ -301,10 +301,10 @@ class VNPAYFlutter {
 
                 return NavigationActionPolicy.ALLOW;
               },
-              // Backup handler: bat window.open o tang native (truong hop
-              // initialUserScripts chua kip chay hoac trang dung iframe).
-              // Luu y: tren Android, request.url co the null khi window duoc
-              // tao bang JS — uu tien xu ly trong shouldOverrideUrlLoading.
+
+              // Fallback for pages that request opening a new window.
+              // Handles payment callbacks and external app links if they
+              // are delivered through a new window instead of normal navigation.
               onCreateWindow: (controller, createWindowAction) async {
                 final url = createWindowAction.request.url?.toString() ?? '';
                 if (url.isEmpty) return false;
