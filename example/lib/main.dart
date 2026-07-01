@@ -28,12 +28,12 @@ class Example extends StatefulWidget {
 }
 
 class _ExampleState extends State<Example> {
-  String responseCode = '';
+  VNPayPaymentStatus? responseCode;
 
   Future<void> onPayment() async {
     final paymentUrl = VNPAYFlutter.instance.generatePaymentUrl(
       url:
-      'sandbox.vnpayment.vn/paymentv2/vpcpay.html', //vnpay url, default is sandbox.vnpayment.vn/paymentv2/vpcpay.html
+      'xxxxxx', //vnpay url, default is sandbox.vnpayment.vn/paymentv2/vpcpay.html
       version: '2.0.1',
       tmnCode: 'xxxx', //vnpay tmn code, get from vnpay
       txnRef: DateTime.now().millisecondsSinceEpoch.toString(),
@@ -51,24 +51,9 @@ class _ExampleState extends State<Example> {
       context: context,
       paymentUrl: paymentUrl,
       returnUrl: "flutter.dev",
-      onPaymentSuccess: (params) {
+      onResponse: (status) {
         setState(() {
-          responseCode = params['vnp_ResponseCode'];
-        });
-      },
-      onPaymentCancel: (params) {
-        setState(() {
-          responseCode = params['vnp_ResponseCode'];
-        });
-      },
-      onPaymentFailed: (params) {
-        setState(() {
-          responseCode = params['vnp_ResponseCode'];
-        });
-      },
-      onOpenBankingApp: (params) {
-        setState(() {
-          responseCode = params['vnp_ResponseCode'];
+          responseCode = status;
         });
       },
     );
@@ -81,7 +66,7 @@ class _ExampleState extends State<Example> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: <Widget>[
-            Text('Response Code: $responseCode'),
+            Text('Response Code: ${responseCode?.name}'),
             TextButton(
               onPressed: onPayment,
               child: const Text('30.000VND'),
