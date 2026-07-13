@@ -245,25 +245,6 @@ class VNPAYFlutter {
     return NavigationActionPolicy.ALLOW;
   }
 
-  static const String _forceSameWindowJs = '''
-(function() {
-  try {
-    window.open = function(url) {
-      if (url) { window.location.href = url; }
-      return window;
-    };
-    if (!window.__vnpaySameWindowPatched__) {
-      window.__vnpaySameWindowPatched__ = true;
-      document.addEventListener('click', function(e) {
-        var el = e.target;
-        while (el && el.tagName !== 'A') { el = el.parentElement; }
-        if (el && el.target && el.target !== '_self') { el.target = '_self'; }
-      }, true);
-    }
-  } catch (e) {}
-})();
-''';
-
   /// Show payment webview
   ///
   /// [onPaymentSuccess], [onPaymentCancel], [onPaymentFailed], [onOpenBankingApp] callback when payment success, cancel, failed, open banking app on app
@@ -314,15 +295,6 @@ class VNPAYFlutter {
                 supportMultipleWindows: true,
                 isInspectable: true,
               ),
-
-              // Inject helper scripts before the page starts loading.
-              // Used to keep navigation in the current WebView whenever possible.
-              initialUserScripts: UnmodifiableListView([
-                UserScript(
-                  source: _forceSameWindowJs,
-                  injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
-                ),
-              ]),
               onReceivedError: (controller, request, error) {
                 print("VNPAY onReceivedError: ${error.type} ${error.description} (url: ${request.url})");
               },
@@ -369,32 +341,6 @@ class VNPAYFlutter {
                 }
 
                 return NavigationActionPolicy.ALLOW;
-              },
-
-              // Fallback for pages that request opening a new window.
-              // Handles payment callbacks and external app links if they
-              // are delivered through a new window instead of normal navigation.
-              onCreateWindow: (controller, createWindowAction) async {
-                final url = createWindowAction.request.url?.toString() ?? '';
-                if (url.isEmpty) return false;
-
-                final currentUri = Uri.parse(url);
-                final isSentinel = currentUri.host.endsWith('sdk.merchantbackapp');
-
-                if (isSentinel) {
-                  onResponse(_statusFromSentinel(currentUri.host));
-                  Navigator.of(context).pop();
-                  return false;
-                }
-
-                if (currentUri.scheme != 'http' && currentUri.scheme != 'https') {
-                  final opened = await _launchExternalApp(url, returnUrl);
-                  if (opened) onResponse(VNPayPaymentStatus.openBankingApp);
-                  return false;
-                }
-
-                await controller.loadUrl(urlRequest: createWindowAction.request);
-                return true;
               },
             ),
           ),
