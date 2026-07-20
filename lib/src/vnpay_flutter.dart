@@ -255,6 +255,7 @@ class VNPAYFlutter {
     AppBar? appBar,
     Function()? onWebPaymentComplete,
     required Function(VNPayPaymentStatus) onResponse,
+    Future<void> Function()? onResume,
   }) async {
     if (kIsWeb) {
       await launchUrlString(
@@ -280,70 +281,140 @@ class VNPAYFlutter {
 
     await Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (context) => SafeArea(
-          child: Scaffold(
-            backgroundColor: Colors.white,
-            appBar: appBar,
-            body: InAppWebView(
-              initialUrlRequest: initialUrlRequest,
-              initialSettings: InAppWebViewSettings(
-                // Allow pages to request opening a new window.
-                // Used as a fallback when a page cannot stay in the current WebView.
-                javaScriptEnabled: true,
-                domStorageEnabled: true,
-                javaScriptCanOpenWindowsAutomatically: true,
-                supportMultipleWindows: true,
-                isInspectable: true,
-              ),
-              onReceivedError: (controller, request, error) {
-                print("VNPAY onReceivedError: ${error.type} ${error.description} (url: ${request.url})");
-              },
-              onReceivedHttpError: (controller, request, errorResponse) {
-                print("VNPAY onReceivedHttpError: ${errorResponse.statusCode} (url: ${request.url})");
-              },
-              // TEST ONLY: bypass TLS certificate validation when the device's
-              // system trust store lacks the server's root CA (e.g. VNPay sandbox
-              // uses a newer Sectigo E46 root missing from older Android WebView
-              // trust stores). MUST stay false in production — trusting all certs
-              // is an MITM vulnerability.
-              onReceivedServerTrustAuthRequest: (controller, challenge) async {
-                final host = challenge.protectionSpace.host;
-                if (host.contains('sandbox.vnpayment.vn')) {
-                  return ServerTrustAuthResponse(action: ServerTrustAuthResponseAction.PROCEED);
-                }
-                return ServerTrustAuthResponse(action: ServerTrustAuthResponseAction.CANCEL);
-              },
-              // Main navigation handler.
-              // Detects payment callbacks, launches external banking apps,
-              // and decides whether to allow or block navigation.
-              shouldOverrideUrlLoading: (controller, navigationAction) async {
-                print("VNPAY URL: ${navigationAction.request.url}");
+        builder: (context) => _VNPayWebViewPage(
+          initialUrlRequest: initialUrlRequest,
+          appBar: appBar,
+          returnUri: returnUri,
+          returnUrl: returnUrl,
+          onResponse: onResponse,
+          onResume: onResume,
+          vnpay: this,
+        ),
+      ),
+    );
+  }
+}
 
-                final url = navigationAction.request.url?.toString() ?? '';
-                if (url.isEmpty) return NavigationActionPolicy.ALLOW;
+/// Payment WebView screen. Stateful so it can observe the app lifecycle and
+/// notify the host on resume — needed when the user pays in the VNPay app and
+/// returns with no return-URL loaded (iOS), so [_handleUrl] never fires.
+class _VNPayWebViewPage extends StatefulWidget {
+  final URLRequest initialUrlRequest;
+  final AppBar? appBar;
+  final Uri returnUri;
+  final String returnUrl;
+  final Function(VNPayPaymentStatus) onResponse;
+  final Future<void> Function()? onResume;
+  final VNPAYFlutter vnpay;
 
-                final currentUri = Uri.parse(url);
+  const _VNPayWebViewPage({
+    required this.initialUrlRequest,
+    required this.appBar,
+    required this.returnUri,
+    required this.returnUrl,
+    required this.onResponse,
+    required this.onResume,
+    required this.vnpay,
+  });
 
-                // Check callback/sentinel before proceeding.
-                final policy = _handleUrl(
-                  url: url,
-                  returnUri: returnUri,
-                  onResponse: onResponse,
-                  context: context,
-                );
-                if (policy == NavigationActionPolicy.CANCEL) return policy;
+  @override
+  State<_VNPayWebViewPage> createState() => _VNPayWebViewPageState();
+}
 
-                // Non-http/https: external banking app / VNPay app.
-                if (currentUri.scheme != 'http' && currentUri.scheme != 'https') {
-                  final opened = await _launchExternalApp(url, returnUrl);
-                  if (opened) onResponse(VNPayPaymentStatus.openBankingApp);
-                  return NavigationActionPolicy.CANCEL;
-                }
+class _VNPayWebViewPageState extends State<_VNPayWebViewPage> with WidgetsBindingObserver {
+  bool _finished = false;
 
-                return NavigationActionPolicy.ALLOW;
-              },
-            ),
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && !_finished) {
+      print("VNPAY webview resumed -> notify host to re-check payment");
+      widget.onResume?.call();
+    }
+    super.didChangeAppLifecycleState(state);
+  }
+
+  void _handleResponse(VNPayPaymentStatus status) {
+    _finished = true;
+    widget.onResponse(status);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Scaffold(
+        backgroundColor: Colors.white,
+        appBar: widget.appBar,
+        body: InAppWebView(
+          initialUrlRequest: widget.initialUrlRequest,
+          initialSettings: InAppWebViewSettings(
+            javaScriptEnabled: true,
+            domStorageEnabled: true,
+            javaScriptCanOpenWindowsAutomatically: true,
+            supportMultipleWindows: true,
+            isInspectable: true,
           ),
+          onReceivedError: (controller, request, error) {
+            print("VNPAY onReceivedError: ${error.type} ${error.description} (url: ${request.url})");
+          },
+          onReceivedHttpError: (controller, request, errorResponse) {
+            print("VNPAY onReceivedHttpError: ${errorResponse.statusCode} (url: ${request.url})");
+          },
+          // TEST ONLY: bypass TLS certificate validation
+          onReceivedServerTrustAuthRequest: (controller, challenge) async {
+            final host = challenge.protectionSpace.host;
+            print("VNPAY onReceivedServerTrustAuthRequest: host: $host");
+            if (host.contains('sandbox.vnpayment.vn')) {
+              return ServerTrustAuthResponse(action: ServerTrustAuthResponseAction.PROCEED);
+            }
+            return ServerTrustAuthResponse(action: ServerTrustAuthResponseAction.CANCEL);
+          },
+          // Main navigation handler.
+          // Detects payment callbacks, launches external banking apps,
+          // and decides whether to allow or block navigation.
+          shouldOverrideUrlLoading: (controller, navigationAction) async {
+            print("VNPAY URL: ${navigationAction.request.url}");
+
+            // Already finished (and popped): block further navigation.
+            if (_finished) return NavigationActionPolicy.CANCEL;
+
+            final url = navigationAction.request.url?.toString() ?? '';
+            if (url.isEmpty) return NavigationActionPolicy.ALLOW;
+
+            final currentUri = Uri.parse(url);
+
+            // Check callback/sentinel before proceeding.
+            final policy = widget.vnpay._handleUrl(
+              url: url,
+              returnUri: widget.returnUri,
+              onResponse: _handleResponse,
+              context: context,
+            );
+            if (policy == NavigationActionPolicy.CANCEL) return policy;
+
+            // Non-http/https: external banking app / VNPay app.
+            if (currentUri.scheme != 'http' && currentUri.scheme != 'https') {
+              final opened = await widget.vnpay._launchExternalApp(url, widget.returnUrl);
+              if (opened) {
+                // Not terminal (user is paying in another app): don't mark finished.
+                widget.onResponse(VNPayPaymentStatus.openBankingApp);
+              }
+              return NavigationActionPolicy.CANCEL;
+            }
+
+            return NavigationActionPolicy.ALLOW;
+          },
         ),
       ),
     );
