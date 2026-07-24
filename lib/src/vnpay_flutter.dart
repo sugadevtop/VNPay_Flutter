@@ -1,35 +1,9 @@
-import 'dart:collection';
-import 'dart:convert';
-
-import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
-import 'package:intl/intl.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:url_launcher/url_launcher_string.dart';
 import 'package:vnpay_flutter/src/model/enum/vnpay_payment_status.dart';
-
-//[VNPayHashType] List of Hash Type in VNPAY, default is HMACSHA512
-enum VNPayHashType {
-  SHA256,
-  HMACSHA512,
-}
-
-//[BankCode] List of valid payment bank in VNPAY, if not provide, it will be manual select, default is null
-enum BankCode { VNPAYQR, VNBANK, INTCARD }
-
-//[VNPayHashTypeExt] Extension to convert from HashType Enum to valid string of VNPAY
-extension VNPayHashTypeExt on VNPayHashType {
-  String toValueString() {
-    switch (this) {
-      case VNPayHashType.SHA256:
-        return 'SHA256';
-      case VNPayHashType.HMACSHA512:
-        return 'HmacSHA512';
-    }
-  }
-}
 
 //[VNPAYFlutter] instance class VNPAY Flutter
 class VNPAYFlutter {
@@ -37,81 +11,6 @@ class VNPAYFlutter {
 
   //[instance] Single Ton Init
   static VNPAYFlutter get instance => _instance;
-
-  Map<String, dynamic> _sortParams(Map<String, dynamic> params) {
-    final sortedParams = <String, dynamic>{};
-    final keys = params.keys.toList()..sort();
-    for (String key in keys) {
-      sortedParams[key] = params[key];
-    }
-    return sortedParams;
-  }
-
-  //[generatePaymentUrl] Generate payment Url with input parameters
-  String generatePaymentUrl({
-    String url = 'https://sandbox.vnpayment.vn/paymentv2/vpcpay.html',
-    required String version,
-    String command = 'pay',
-    required String tmnCode,
-    String locale = 'vn',
-    String currencyCode = 'VND',
-    required String txnRef,
-    String orderInfo = 'Pay Order',
-    required double amount,
-    required String returnUrl,
-    required String ipAdress,
-    DateTime? createAt,
-    required String vnpayHashKey,
-    VNPayHashType vnPayHashType = VNPayHashType.HMACSHA512,
-    String vnpayOrderType = 'other',
-    BankCode? bankCode,
-    required DateTime vnpayExpireDate,
-  }) {
-    final params = <String, String>{
-      'vnp_Version': version,
-      'vnp_Command': command,
-      'vnp_TmnCode': tmnCode,
-      'vnp_Locale': locale,
-      'vnp_CurrCode': currencyCode,
-      'vnp_TxnRef': txnRef,
-      'vnp_OrderInfo': orderInfo,
-      'vnp_Amount': (amount * 100).toStringAsFixed(0),
-      'vnp_ReturnUrl': returnUrl,
-      'vnp_IpAddr': ipAdress,
-      'vnp_CreateDate': DateFormat('yyyyMMddHHmmss').format(createAt ?? DateTime.now()).toString(),
-      'vnp_OrderType': vnpayOrderType,
-      'vnp_ExpireDate': DateFormat('yyyyMMddHHmmss').format(vnpayExpireDate).toString(),
-    };
-    if (bankCode != null) {
-      params['vnp_BankCode'] = bankCode.name;
-    }
-    var sortedParam = _sortParams(params);
-    final hashDataBuffer = StringBuffer();
-    sortedParam.forEach((key, value) {
-      hashDataBuffer.write(key);
-      hashDataBuffer.write('=');
-      hashDataBuffer.write(value);
-      hashDataBuffer.write('&');
-    });
-    String hashData = hashDataBuffer.toString().substring(0, hashDataBuffer.length - 1);
-
-    // URL-encode query parameter values to ensure special characters
-    // (e.g. spaces, '&', '?', '=') produce a valid payment URL.
-    // The hash is still calculated from the original values, matching
-    // VNPay's signature validation rules.
-    String query = sortedParam.entries.map((e) => '${e.key}=${Uri.encodeComponent(e.value)}').join('&');
-    String vnpSecureHash = "";
-
-    if (vnPayHashType == VNPayHashType.SHA256) {
-      List<int> bytes = utf8.encode(vnpayHashKey + hashData.toString());
-      vnpSecureHash = sha256.convert(bytes).toString();
-    } else if (vnPayHashType == VNPayHashType.HMACSHA512) {
-      vnpSecureHash = Hmac(sha512, utf8.encode(vnpayHashKey)).convert(utf8.encode(hashData)).toString();
-    }
-    String paymentUrl = "$url?$query&vnp_SecureHashType=${vnPayHashType.toValueString()}&vnp_SecureHash=$vnpSecureHash";
-    debugPrint("=====>[PAYMENT URL]: $paymentUrl");
-    return paymentUrl;
-  }
 
   /// Opens an external application for non-HTTP(S) URLs such as
   /// banking app deep links, VNPay links, or Android intent URLs.
@@ -224,11 +123,12 @@ class VNPAYFlutter {
   /// Handles payment callback URLs and determines whether the navigation should continue or be intercepted.
   NavigationActionPolicy _handleUrl({
     required String url,
-    required Uri returnUri,
+    required String returnUrl,
     required Function(VNPayPaymentStatus) onResponse,
     required BuildContext context,
   }) {
     final currentUri = Uri.parse(url);
+    final returnUri = Uri.parse(returnUrl.toString());
 
     final hasVnpResult = currentUri.queryParameters.containsKey('vnp_ResponseCode') || currentUri.queryParameters.containsKey('vnp_TxnRef');
     final hostPathMatch = currentUri.host == returnUri.host && currentUri.path == returnUri.path;
@@ -255,7 +155,6 @@ class VNPAYFlutter {
     AppBar? appBar,
     Function()? onWebPaymentComplete,
     required Function(VNPayPaymentStatus) onResponse,
-    Future<void> Function()? onResume,
   }) async {
     if (kIsWeb) {
       await launchUrlString(
@@ -267,8 +166,6 @@ class VNPAYFlutter {
       }
       return;
     }
-
-    final returnUri = Uri.parse(returnUrl);
 
     late final URLRequest initialUrlRequest;
     try {
@@ -284,10 +181,8 @@ class VNPAYFlutter {
         builder: (context) => _VNPayWebViewPage(
           initialUrlRequest: initialUrlRequest,
           appBar: appBar,
-          returnUri: returnUri,
           returnUrl: returnUrl,
           onResponse: onResponse,
-          onResume: onResume,
           vnpay: this,
         ),
       ),
@@ -295,69 +190,30 @@ class VNPAYFlutter {
   }
 }
 
-/// Payment WebView screen. Stateful so it can observe the app lifecycle and
-/// notify the host on resume — needed when the user pays in the VNPay app and
-/// returns with no return-URL loaded (iOS), so [_handleUrl] never fires.
-class _VNPayWebViewPage extends StatefulWidget {
+/// Payment WebView screen.
+class _VNPayWebViewPage extends StatelessWidget {
   final URLRequest initialUrlRequest;
   final AppBar? appBar;
-  final Uri returnUri;
   final String returnUrl;
   final Function(VNPayPaymentStatus) onResponse;
-  final Future<void> Function()? onResume;
   final VNPAYFlutter vnpay;
 
   const _VNPayWebViewPage({
     required this.initialUrlRequest,
     required this.appBar,
-    required this.returnUri,
     required this.returnUrl,
     required this.onResponse,
-    required this.onResume,
     required this.vnpay,
   });
-
-  @override
-  State<_VNPayWebViewPage> createState() => _VNPayWebViewPageState();
-}
-
-class _VNPayWebViewPageState extends State<_VNPayWebViewPage> with WidgetsBindingObserver {
-  bool _finished = false;
-
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addObserver(this);
-  }
-
-  @override
-  void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    super.dispose();
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed && !_finished) {
-      print("VNPAY webview resumed -> notify host to re-check payment");
-      widget.onResume?.call();
-    }
-    super.didChangeAppLifecycleState(state);
-  }
-
-  void _handleResponse(VNPayPaymentStatus status) {
-    _finished = true;
-    widget.onResponse(status);
-  }
 
   @override
   Widget build(BuildContext context) {
     return SafeArea(
       child: Scaffold(
         backgroundColor: Colors.white,
-        appBar: widget.appBar,
+        appBar: appBar,
         body: InAppWebView(
-          initialUrlRequest: widget.initialUrlRequest,
+          initialUrlRequest: initialUrlRequest,
           initialSettings: InAppWebViewSettings(
             javaScriptEnabled: true,
             domStorageEnabled: true,
@@ -375,7 +231,7 @@ class _VNPayWebViewPageState extends State<_VNPayWebViewPage> with WidgetsBindin
           onReceivedServerTrustAuthRequest: (controller, challenge) async {
             final host = challenge.protectionSpace.host;
             print("VNPAY onReceivedServerTrustAuthRequest: host: $host");
-            if (host.contains('sandbox.vnpayment.vn')) {
+            if (host.contains('sandbox.vnpayment.vn') || host.contains('vps-dev02-ssl.teanis.xyz')) {
               return ServerTrustAuthResponse(action: ServerTrustAuthResponseAction.PROCEED);
             }
             return ServerTrustAuthResponse(action: ServerTrustAuthResponseAction.CANCEL);
@@ -386,29 +242,25 @@ class _VNPayWebViewPageState extends State<_VNPayWebViewPage> with WidgetsBindin
           shouldOverrideUrlLoading: (controller, navigationAction) async {
             print("VNPAY URL: ${navigationAction.request.url}");
 
-            // Already finished (and popped): block further navigation.
-            if (_finished) return NavigationActionPolicy.CANCEL;
-
             final url = navigationAction.request.url?.toString() ?? '';
             if (url.isEmpty) return NavigationActionPolicy.ALLOW;
 
             final currentUri = Uri.parse(url);
 
             // Check callback/sentinel before proceeding.
-            final policy = widget.vnpay._handleUrl(
+            final policy = vnpay._handleUrl(
               url: url,
-              returnUri: widget.returnUri,
-              onResponse: _handleResponse,
+              returnUrl: returnUrl,
+              onResponse: onResponse,
               context: context,
             );
             if (policy == NavigationActionPolicy.CANCEL) return policy;
 
             // Non-http/https: external banking app / VNPay app.
             if (currentUri.scheme != 'http' && currentUri.scheme != 'https') {
-              final opened = await widget.vnpay._launchExternalApp(url, widget.returnUrl);
+              final opened = await vnpay._launchExternalApp(url, returnUrl);
               if (opened) {
-                // Not terminal (user is paying in another app): don't mark finished.
-                widget.onResponse(VNPayPaymentStatus.openBankingApp);
+                onResponse(VNPayPaymentStatus.openBankingApp);
               }
               return NavigationActionPolicy.CANCEL;
             }
